@@ -1,0 +1,670 @@
+---
+title: "Part IV - CollegeScorecard"
+author: "Jacob Waldor & Moe Sunami"
+output:
+  pdf_document: default
+  html_notebook: default
+  html_document:
+    df_print: paged
+---
+
+```{r setup, include=FALSE}
+library(dplyr)
+library(knitr)
+library(skimr)
+library(ggplot2)
+library(broom)
+library(tidyverse)
+library(rsample)
+library(GGally)
+library(recipes)
+library(gridExtra)
+library(mosaic)
+library(mosaicData)
+library(captioner)
+library(kableExtra)
+library(parsnip)
+library(workflows)
+library(tune)
+library(formatR)
+library(dials)
+knitr::opts_chunk$set(include= FALSE)
+```
+
+```{r readdata}
+collegedata = read.csv("augmented_cleaned.csv")
+```
+
+## Introduction
+
+College ScoreCard^[This data is published by the Office of Planning, Evaluation, and Policy Development at the U.S. Department of Education and is made available at [collegescorecard.ed.gov](http://www.collegescorecard.ed.gov). The data is drawn from data reported to IPEDS (Integrated Postsecondary Education Data System) from parent institutions.] provides institution-level data for approximately all institutions of higher education in the United States, including college type, costs, graduation & retention, financial aid and debt, test scores, earnings, and demographics. To be included in the dataset, institutions must fulfill essential functions of a college to make them eligible for federal student financial assistance from Title IV programs. Colleges that are not in the dataset may not offer the equivalent of 1 weeks of education, or may not provide degrees towards gainful employment or the liberal arts. 
+
+For this project, we seek explain the prestige of U.S. institutions of higher education with four-year undergraduate programs, using admission rate as a measure of prestige. We do not have a random sample; we begin with a dataset that contains approximately entire population, and analyze the observations among them that have complete data. So, our goal is to describe the relationships that are present in our data, as opposed to  evaluating relationships that can be generalized to a larger population. 
+
+- Which set of regressors most succinctly summarizes the variance in admission rate? Admission rate is a mysterious quantity, so we want to demystify it by seeing if we can find a small set of variables that explains the variance in it well. 
+- What theories can explain variance in admission rates? We might expect that, if a college is more selective, its graduates earn more after graduation.
+
+<!--Preparing our original dataset!!! This is not shown-->
+```{r preparedataset}
+
+# Changing the format for the columns of interest
+collegedata$SAT_AVG = as.numeric(as.character(collegedata$SAT_AVG))
+#collegedata$SAT_AVG_sq = (as.numeric(collegedata$SAT_AVG))**2
+collegedata$UGDS = as.numeric(as.character(collegedata$UGDS))
+collegedata$ENDOWBEGIN = as.numeric(as.character(collegedata$ENDOWBEGIN))
+collegedata$ENDOWBEGIN_transformed <- log(collegedata$ENDOWBEGIN)
+collegedata$WOMENONLY = as.numeric(collegedata$WOMENONLY)
+collegedata$HBCU = as.numeric(collegedata$HBCU)
+collegedata$ADM_RATE_ALL = as.numeric(as.character(collegedata$ADM_RATE_ALL))
+collegedata$SATMT75 = as.numeric(as.character(collegedata$SATMT75))
+collegedata$SATMT25 = as.numeric(as.character(collegedata$SATMT25 ))
+collegedata$SATVRMID = as.numeric(as.character(collegedata$SATVRMID))
+collegedata$SATMTMID = as.numeric(as.character(collegedata$SATMTMID))
+collegedata$PCTPELL.1819 = as.numeric(as.character(collegedata$PCTPELL.1819))
+collegedata$PCTFLOAN.1819 = as.numeric(as.character(collegedata$PCTFLOAN.1819))
+collegedata$COMPL_RPY_5YR_RT.1617 = as.numeric(as.character(collegedata$COMPL_RPY_5YR_RT.1617))
+collegedata$GT_THRESHOLD_P10.1819 = as.numeric(as.character(collegedata$GT_THRESHOLD_P10.1819))
+collegedata$MD_EARN_WNE_P10.1819= as.numeric(as.character(collegedata$MD_EARN_WNE_P10.1819))
+```
+
+```{r, include = FALSE}
+library(ISLR)
+library(dplyr)
+library(tidyr)
+library(pls)
+Hitters = na.omit(Hitters) # Omit empty rows
+set.seed(2)
+pcr_fit = pcr(Salary~., data = Hitters, scale = TRUE, validation = "CV")
+summary(pcr_fit)
+```
+
+### Variables of Interest
+
+Of the `r ncol(collegedata)` variables in our dataset, we have selected 15 which seemed to have reasonable theoretical relationships to admission rates and were available from recent years (Table 1). Additional feature engineered variables are indicated with a *.
+
+```{r identifyRelevantColumns}
+cols_of_interest <- c("ADM_RATE_ALL","SAT_AVG","WOMENONLY","HBCU","ENDOWBEGIN_transformed","UGDS","SATMT75","SATMT25","SATVRMID","SATMTMID","PCTPELL.1819","PCTFLOAN.1819","GT_THRESHOLD_P10.1819","MD_EARN_WNE_P10.1819","COMPL_RPY_5YR_RT.1617")
+cols_of_interest_for_display <- c("ADM_RATE_ALL","SAT_AVG","WOMENONLY","HBCU","ENDOWBEGIN","UGDS","SATMT75","SATMT25","SATVRMID","SATMTMID","PCTPELL","PCTFLOAN","GT_THRESHOLD_P10","MD_EARN_WNE_P10","COMPL_RPY_5YR_RT")
+```
+
+```{r datadict,}
+datadict <- read.csv("data_dictionary.csv")
+varnames <- datadict %>%
+  select(VARIABLE.NAME, NAME.OF.DATA.ELEMENT) %>%
+  filter(VARIABLE.NAME %in% cols_of_interest_for_display)
+names(varnames) <- c('Variable name', 'Description')
+#write_csv("varnames.csv")
+
+ft_var_names <- c('*LOWSAT', '*HIGHSAT', '*SATmathinterquartile', '*SATverbalmathdiff')
+ft_var_description <- c('Equal to SAT_AVG when SAT_AVG < 1300, 0 otherwise',
+                        'Equal to SAT_AVG when SAT_AVG >= 0, 0 otherwise',
+                        'SAT math interquartile range (25th to 75th percentile), indicating spread',
+                        'Difference between median verbal and math scores on the SAT, indicating level of focus on either humanities or STEM')
+ft_var_df <- data.frame(ft_var_names, ft_var_description)
+names(ft_var_df) <- c('Variable name', 'Description')
+allvars <- rbind(varnames, ft_var_df)
+```
+
+```{r include=TRUE, echo=FALSE, fig.cap = "Variables of interest"}
+kable(allvars, col.names=c('Name', 'Description'), longtable=FALSE, booktabs=TRUE, caption="Relevant variables") %>%
+  #kable_styling()) %>%
+  column_spec(1, width='2in') %>%
+  column_spec(2, width='4in')
+```
+
+Note from Part II that we have transformed the `ENDOWBEGIN` variable with a log function to meet LINE conditions.
+
+```{r, include=FALSE, echo=FALSE}
+ft_var_names <- c('LOWSAT', 'HIGHSAT', 'SATmathinterquartile', 'SATverbalmathdiff')
+ft_var_description <- c('Equal to SAT_AVG when SAT_AVG < 1300, 0 otherwise',
+                        'Equal to SAT_AVG when SAT_AVG >= 0, 0 otherwise',
+                        'SAT math interquartile range (25th to 75th percentile), indicating spread',
+                        'Difference between median verbal and math scores on the SAT, indicating level of focus on either humanities or STEM')
+ft_var_df <- data.frame(ft_var_names, ft_var_description)
+kable(ft_var_df, col.names=c('Name', 'Description'), longtable=FALSE, booktabs=TRUE, caption="Feature engineered variables") %>%
+  #kable_styling()) %>%
+  column_spec(1, width='2in') %>%
+  column_spec(2, width='4in')
+```
+
+```{r splitdata}
+
+# Take a subset of the variables of interest 
+relevant_df_og <- collegedata[cols_of_interest]
+
+# Keep the rows without NA values
+na_df <- relevant_df_og[rowSums(is.na(relevant_df_og)) > 0,]
+relevant_df <- relevant_df_og[rowSums(is.na(relevant_df_og)) == 0,]
+
+# Create an initial split
+set.seed(123)
+college_split <- initial_split(relevant_df)
+
+# Save training data
+college_train <- training(college_split)
+dim(college_train)
+
+# Save testing data
+college_test  <- testing(college_split)
+```
+
+### Note on Missing Values
+
+Although we have identified 1465 colleges in CollegeScorecard offering four-year undergraduate programs, only 1085 of them (approximately three-fourths) have complete data for all of our relevant predictors. We suspect that those 1085 colleges are not a random sample, and that there is a pattern to which colleges have complete data. For example, none of the Claremont Colleges have complete data because its 5-year loan repayment rate is noted as "PrivacySuppressed," presumably because of small class sizes. Hence the p-values that may accompany hypothesis testing in this report, or confidence and prediction intervals, must be taken with a grain of salt because it is *not* the probability of observing more unusual data, given $H_0$ were true, if we were to have another "random" set of observations. 
+
+<!--
+- ENDOWBEGIN_transformed and SAT_AVG
+- ENDOWBEGIN_transformed and MD_EARN
+- PCTPELL and HBCU density graph
+- PCTPELL and SAT_AVG
+- MD_EARN_WNE_P10.1819 and GT_THRESHOLD_P10.1819
+- COMPL_RPY_5YR_RT and PCTPELL.1819
+- COMPL_RPY_5YR_RT and GT_THRESHOLD_P10.1819-->
+
+
+```{r adm3}
+adm_rec3 <- recipe(
+  ADM_RATE_ALL ~ .,    # formula
+  data = college_train # data for cataloging names and types of variables
+  )
+
+#ALL variables being considered:
+consvars3 = c("ADM_RATE_ALL","SAT_AVG","WOMENONLY","HBCU","ENDOWBEGIN_transformed","UGDS","SATMT75","SATMT25","SATVRMID","SATMTMID","PCTPELL.1819","PCTFLOAN.1819","COMPL_RPY_5YR_RT.1617","GT_THRESHOLD_P10.1819","MD_EARN_WNE_P10.1819")#,"INSTNM")
+consvars3reg = c("ADM_RATE_ALL$","SAT_AVG$","WOMENONLY$","HBCU$","ENDOWBEGIN_transformed$","UGDS$","SATMT75$","SATMT25$","SATVRMID$","SATMTMID$","PCTPELL.1819$","PCTFLOAN.1819$","COMPL_RPY_5YR_RT.1617$","GT_THRESHOLD_P10.1819$","MD_EARN_WNE_P10.1819$")#,"INSTNM$")
+consvars3minusoutcome = c("SAT_AVG","WOMENONLY","HBCU","ENDOWBEGIN_transformed","SATMT75","SATMT25","SATVRMID","SATMTMID","PCTPELL.1819","PCTFLOAN.1819","COMPL_RPY_5YR_RT.1617","GT_THRESHOLD_P10.1819","MD_EARN_WNE_P10.1819")
+adm_rec3 <- adm_rec3 %>% step_select(matches(consvars3reg))  %>% step_mutate(SATmathinterquartile = as.numeric(SATMT75) - as.numeric(SATMT25)) %>% step_mutate(SATverbalmathdiff = as.numeric(SATVRMID) - as.numeric(SATMTMID)) %>% step_mutate(LOWSAT = case_when (SAT_AVG<1300 ~ SAT_AVG, TRUE ~ 0),HIGHSAT = case_when(SAT_AVG >= 1300  ~ SAT_AVG, TRUE ~ 0 ))  %>% step_rm(c("SAT_AVG")) %>% step_interact(terms = ~ matches("UGDS$"):matches("PCTFLOAN.1819$")) %>% step_interact(terms = ~ matches("ENDOWBEGIN_transformed$"):matches("MD_EARN_WNE_P10.1819$")) %>% step_interact(terms = ~ matches("GT_THRESHOLD_P10.1819$"):matches("MD_EARN_WNE_P10.1819$")) %>% step_interact(terms = ~ matches("PCTFLOAN.1819$"):matches("MD_EARN_WNE_P10.1819$")) %>%
+step_normalize(all_predictors())# %>% #step_ordinalscore(has_type(match != "numeric")) #%>% step_interact(terms = ~ matches("SAT_AVG$"):matches("MD_EARN_WNE_P10.1819$")) %>% step_interact(terms = ~ matches("PCTPELL.1819$"):matches("WOMENONLY$"))  #%>% step_interact(terms = ~ matches("UGDS$"):matches("PCTLOAN$")) #"SATMT75","SATMT25","SATVRMID","SATMTMID"
+#%>% step_interact(terms = ~ matches("UGDS$"):matches("PCTFLOAN.1819$")) 
+
+#%>% update_role(INSTNM,new_role = "id variable")
+#
+preped_adm_rec3 <- prep(adm_rec3)
+
+bakedsubset <- bake(preped_adm_rec3,college_train)
+bakedsubset
+```
+
+
+```{r addbins}
+# college_train <- college_train %>% 
+#   mutate(college_train, sat_group = cut(college_train$SAT_AVG, breaks=c(0, 1300, Inf), labels=c("<1300", ">1300"))) %>%
+#   mutate(college_train, adm_bin2 = cut_interval(college_train$ADM_RATE_ALL, 5)) %>%
+#   mutate(college_train, size_bin3 = cut_number(college_train$UGDS, 4, dig.lab=10)) %>%
+#   mutate(college_train, earning_bin = cut_number(college_train$MD_EARN_WNE_P10.1819, 4)) %>%
+#   mutate(college_train, pell_bin = cut_number(college_train$PCTPELL.1819, 4)) %>%
+#   mutate(college_train, repayment_bin2 = cut_number(college_train$COMPL_RPY_5YR_RT.1617, 4))
+```
+
+
+```{r include=FALSE, echo=FALSE, fig.cap="Forward Stepwise Evaluation of Models"}
+# numvars <- 
+# aic <- c(-833.50, -826.60)
+# bic <- c(-758.29, -770.19)
+# radj <- c(0.465, 0.457)
+# forwardres <- data.frame("Variables"=c(14, 10), 
+#                          "AIC"=c(-833.50, -826.60),
+#                          "BIC"=c(-758.29, -770.19),
+#                          "Adj.R.Sq"=c(0.465, 0.457),
+#                          row.names=c("Forward stepwise with AIC as criterion", "Forward stepwise with BIC as criterion"))
+# 
+# kable(forwardres, booktabs=TRUE, caption="Forward Stepwise Evaluation") %>%
+#   kable_styling(latex_options = c("HOLD_position"))
+```
+
+
+```{r forwardbic, include=FALSE, echo=FALSE, tidy=TRUE, tidy.opts=list(width.cutoff=10)}
+library(leaps)
+#define intercept-only model
+intercept_only <- lm(ADM_RATE_ALL ~ 1, data=bakedsubset)
+
+#define model with all predictors
+all <- lm(ADM_RATE_ALL ~ ., data=bakedsubset)
+
+#perform forward stepwise regression
+forward <- stats::step(intercept_only, direction='forward', scope=formula(all), trace=0, k=log(nrow(bakedsubset)))
+forward %>% tidy()
+#forward %>% glance()
+```
+
+<!-- Part 4 -->
+
+## Section 1
+
+### Ridge Regression
+To prepare our data for ridge regression, PCR, and LASSO, we normalize the dataset by finding the mean and standard deviation of each variable and replacing each value with the number of standard deviations by which the value differs from the variable mean. We also re-generate our MLR model using normalized data so that the coefficients are comparable to the coefficients in the other models.
+
+We run a ridge regression on the set of all ~30 predictors that were fed into the forward selection model.
+```{r, warning = FALSE, echo = FALSE}
+office_rec <- adm_rec3
+ridge_spec <- linear_reg(mixture = 0, penalty = 47) %>%
+  set_mode("regression") %>%
+  set_engine("glmnet")
+ridge_wf <- workflow() %>%
+  add_recipe(office_rec)
+ridge_fit <- ridge_wf %>%
+  add_model(ridge_spec) %>%
+  fit(data = college_train)
+ridge_spec_tune <- linear_reg(mixture = 0, penalty = tune()) %>%
+  set_mode("regression") %>%
+  set_engine("glmnet")
+office_fold <- vfold_cv(college_train)
+  
+ridge_grid <- grid_regular(penalty(range = c(-5, 6)), levels = 50)
+
+ridge_wf <- workflow() %>%
+  add_recipe(office_rec)
+
+ridge_fit <- ridge_wf %>%
+  add_model(ridge_spec_tune) %>%
+  fit(data = college_train)
+
+# this is the line that tunes the model using cross validation
+set.seed(2020)
+ridge_cv <- tune_grid(
+  ridge_wf %>% add_model(ridge_spec_tune),
+  resamples = office_fold,
+  grid = ridge_grid, control = control_grid(save_pred = TRUE)
+)
+mets <- collect_metrics(ridge_cv) %>%
+  filter(.metric == "rmse") %>%
+  arrange(mean)
+mets
+best_rr <- select_best(ridge_cv, metric = "rmse")
+best_rr
+ridge_final <- finalize_workflow(ridge_wf %>% add_model(ridge_spec_tune), best_rr) %>%
+  fit(data = college_train)
+ridgeco <- ridge_final %>% tidy()
+#ridgeco
+glmn_predrr <- collect_predictions(ridge_cv)
+```
+
+
+```{r}
+#sortedf <- forward[order(forward$term),]
+#sortedridge <- ridgeco[order(ridgeco$term),]
+# tidy(forward)$term
+# tidy(forward)$estimate
+# est <- ridgeco %>% filter(term %in% tidy(forward)$term)
+# est$term
+# est$estimate
+# 
+# est
+# tidy(forward)
+```
+
+Below is a plot of the ridge coefficients vs. the the MLR coefficients. Below, we only examine the coefficients for the 10 variables that were included in the MLR model—the other ~20 ridge coefficients are excluded. Since we normalized the dataset, we can compare the magnitudes of these coefficients as well as the directions.
+```{r, warning=FALSE, include=TRUE, echo=FALSE}
+#ridgeco
+ggplot()+geom_point(data = ridgeco[match(tidy(forward)$term, ridgeco$term),], aes(x = term, y = estimate,color = "Ridge")) + geom_point(data = tidy(forward), aes(x = term, y = estimate,color = "MLR")) +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=0.85)) + scale_x_discrete(label=abbreviate) + labs(y= "Coefficient", x = "Predictor") + ggtitle(str_wrap("Coefficients for the 10 variables included in the MLR and ridge models. Coefficients are dramatically reduced, in particular SAT-related ones.",60))
+
+#CHANGE X AXIS LABEL
+  #theme(axis.title.x=element_blank(),
+  #      axis.text.x=element_blank(),
+  #      axis.ticks.x=element_blank())
+#
+```
+<!-- Check -->
+
+The leftmost dot in the figure above corresponds to the intercept. The intercept is exactly the same for both models—a red dot is visible because it overlaps with the blue dot.
+
+We see that ridge regression produces dramatically different coefficients for HIGHSAT and LOWSAT. Both of these coefficients were very large in the original model. We also notice that some coefficients, including UGDS, switch signs. This is reasonable given that UGDS has high p-value.
+
+Lastly, we turn our attention to variables that were not included in the forward model. We compare the average magnitude of coefficients for all variables in the ridge regression to the average magnitude of the coefficients for ridge regression variables that also appeared in our MLR model. The average magnitude for the former is 0.04, whereas the average magnitude for the latter is 0.08. This difference is natural; the MLR model includes the variables with relatively high explanatory power, so these variables should have higher coefficients in the ridge regression.
+```{r}
+summary(abs(ridgeco$estimate))
+ridgecofor <- ridgeco %>% filter(term %in% tidy(forward)$term)
+summary(abs(ridgecofor$estimate))
+```
+
+### LASSO
+
+We now turn our attention to the LASSO.
+```{r}
+lasso_spec_tune <- linear_reg(mixture = 1, penalty = tune()) %>%
+  set_mode("regression") %>%
+  set_engine("glmnet")
+lasso_grid <- grid_regular(penalty(range = c(-5, 5)), levels = 50)
+
+lasso_wf <- workflow() %>%
+  add_recipe(office_rec)
+
+lasso_fit <- lasso_wf %>%
+  add_model(lasso_spec_tune) %>%
+  fit(data = college_train)
+
+# this is the line that tunes the model using cross validation
+set.seed(2020)
+lasso_cv <- tune_grid(
+  lasso_wf %>% add_model(lasso_spec_tune),
+  resamples = office_fold,
+  grid = lasso_grid, control = control_grid(save_pred = TRUE)
+)
+best_lasso <- select_best(lasso_cv, metric = "rmse")
+best_lasso
+lasso_final <- finalize_workflow(lasso_wf %>% add_model(lasso_spec_tune), best_lasso) %>%
+  fit(data = college_train)
+lasso_final %>% tidy()
+glmn_predls <- collect_predictions(lasso_cv)
+```
+
+
+Unlike ridge regression, the LASSO zeroes out some of the coefficients. Therefore, we can think of the LASSO as comparable to the forward selection algorithm that generated our MLR model. To compare the LASSO to the forward selection algorithm, we look at which coefficients fall out when we run the LASSO model and compare it to which variables made it into our MLR model. Unsurprisingly, a bunch of interaction terms fall out of the model. Also removed are MD_EARN_WNE_P10.1819, WOMENONLY, SATverbalmathdiff, SATMT25, and SATMTMID, which is unsurprising since they also were not included in our MLR model. 
+
+While it did not fall out of the MLR model, UGDS fell out of this one. Two interaction terms involving UGDS were included, however, whereas only one was included in the MLR model. The one interaction term in the MLR model that has UGDS is also included in this model.
+
+Our LASSO included some variables that did not end up in our MLR model, including GT_THRESHOLD_P10.1819, MD_EARN_WNE_P10.1819, PCTFLOAN.1819, and	SATVRMID. The first three did show in the MLR's interaction terms though. Although SATVRMID did not appear in any of the MLR model's interaction terms, its coefficient in the LASSO model is pretty low.
+
+Overall, it looks like LASSO selected variables that were not much different from our MLR.
+
+
+<!-- Values of coeffs?: -->
+<!-- If you include this, include graph. -->
+### Outcomes vs. Predictions for all three models
+We generate a graph with outcomes vs. predictions for all three models together.
+
+```{r, include = TRUE, echo = FALSE, warning = FALSE}
+glmn_predrr <- 
+  glmn_predrr %>% 
+  inner_join(select_best(ridge_cv, metric = "rmse", maximize = FALSE), by = c("penalty"))
+glmn_predls <- 
+  glmn_predls %>% 
+  inner_join(select_best(ridge_cv, metric = "rmse", maximize = FALSE), by = c("penalty"))
+dfforward <- augment(forward)
+
+ggplot() + geom_point(data = glmn_predrr, aes(y = .pred, x = ADM_RATE_ALL,color = "Ridge Regression")) +
+  geom_point(data = glmn_predls, aes(y = .pred, x = ADM_RATE_ALL,color = "LASSO")) +
+  geom_point(data = dfforward, aes(y = .fitted, x =ADM_RATE_ALL,color = "MLR")) +
+  geom_point(alpha = .3) + 
+  coord_equal() + ggtitle( str_wrap("Observed vs. Predicted for MLR, Lasso, and Ridge Regression. The three models have similar results.", 60)) +  geom_abline(col = "brown") 
+
+# dfridge <- augment(ridge_final)
+# dflasso <- augment(lasso_final)
+# 
+# predict(ridge_final,college_train)
+# 
+# predsridge <- glmnet(bakedsubset[,2:30], bakedsubset$ADM_RATE_ALL, alpha = 0, family = 'gaussian', lambda = best_rr)
+# 
+# ggplot()+geom_point(data = college_train, aes(x = ADM_RATE_ALL, y = glmnet(x, y_train, nlambda = 25, alpha = 0, family = 'gaussian', lambda = best_rr),color = "blue"))# +geom_point(data = dflasso, aes(x = OBSERVED, y = .fitted,color = "red")) + geom_point(data = dfforward, aes(x = OBSERVED, y = .fitted,color = "yellow")) +
+#   geom_hline(aes(yintercept=0), color="green")
+
+```
+First, we notice that the three models have very similar results. This is surprising given how ridge regression seems to reduce some of the the coefficients so much. It could be that ridge spreads the explanatory power between collinear variables more, leading to similar results but with more variables taking an explanatory role in the model.
+
+Little is apparent other than this. One strange thing is that LASSO seems to produce the most points that are very far away from the line. 
+
+Lastly, it is fascinating how the shape of this plot is similar to the `SAT_AVG` vs. admission rate plot. This similarity suggests that `SAT_AVG`—and variables collinear to it—could really possess the bulk of the explanatory power. The plots also reveal that we are much better at predicting the admission rates of selective schools.
+
+### Spline & Kernel Smoothing for SAT_AVG
+Because we witnessed some interesting relationships between `SAT_AVG` and `ADM_RATE_ALL` in part 3, we will run splines with `SAT_AVG` and `ADM_RATE_ALL` here.
+
+We run splines with the following knots:
+\begin{enumerate}
+\item At SAT\_AVG = 1300 with degree 2
+\item At SAT\_AVG = 1000, 1300 with degree 2
+\item At SAT\_AVG = 1300, 1600 with degree 2
+\item At SAT\_AVG = 1300 with degree 1
+\item At SAT\_AVG = 1300 with degree 5
+\end{enumerate}
+
+
+```{r, warning = FALSE}
+library(splines)
+year_knot1 <- bs(college_train$SAT_AVG, knots=c(1300), degree=2)
+wind_rs1 <- lm(ADM_RATE_ALL ~ year_knot1, data=college_train)
+
+year_knot2 <- bs(college_train$SAT_AVG, knots=c(1000,1300), degree=2)
+wind_rs2 <- lm(ADM_RATE_ALL ~ year_knot2, data=college_train)
+
+
+year_knot3 <- bs(college_train$SAT_AVG, knots=c(1300,1600), degree=2)
+wind_rs3 <- lm(ADM_RATE_ALL ~ year_knot3, data=college_train)
+
+
+year_knot4 <- bs(college_train$SAT_AVG, knots=c(1300), degree=1)
+wind_rs4 <- lm(ADM_RATE_ALL ~ year_knot4, data=college_train)
+
+year_knot5 <- bs(college_train$SAT_AVG, knots=c(1300), degree=5)
+wind_rs5 <- lm(ADM_RATE_ALL ~ year_knot5, data=college_train)
+
+
+wind_cols1 <- wind_rs1 %>% 
+  augment(se_fit = TRUE) %>% rename(.fitted1 = .fitted) 
+
+wind_cols2 <- wind_rs2 %>% 
+  augment(se_fit = TRUE) %>% rename(.fitted2 = .fitted)
+  
+wind_cols3 <- wind_rs3 %>% 
+  augment(se_fit = TRUE) %>% rename(.fitted3 = .fitted)
+
+wind_cols4 <- wind_rs4 %>% 
+  augment(se_fit = TRUE) %>% rename(.fitted4 = .fitted)
+
+wind_cols5 <- wind_rs5 %>% 
+  augment(se_fit = TRUE) %>% rename(.fitted5 = .fitted)
+
+wind_lo1 <- loess(ADM_RATE_ALL ~ SAT_AVG, span=.2, data=college_train)
+
+wind_lo2 <- loess(ADM_RATE_ALL ~ SAT_AVG, span=.5, data=college_train)
+
+wind_lo3 <- loess(ADM_RATE_ALL ~ SAT_AVG, span = 0.8, data=college_train)
+
+wind_lo4 <- loess(ADM_RATE_ALL ~ SAT_AVG, span = 2, data=college_train)
+
+wind_cols6 <- wind_lo1  %>% 
+  augment(se_fit = TRUE) %>%  rename(.fitted6 = .fitted)
+
+wind_cols7 <- wind_lo2  %>% 
+  augment(se_fit = TRUE) %>%  rename(.fitted7 = .fitted)
+
+wind_cols8 <- wind_lo3  %>% 
+  augment(se_fit = TRUE) %>%  rename(.fitted8 = .fitted)
+
+wind_cols9 <- wind_lo4  %>% 
+  augment(se_fit = TRUE) %>%  rename(.fitted9 = .fitted)
+splineplot <- wind_cols1 %>% bind_cols(wind_cols2) %>% bind_cols(wind_cols3) %>% bind_cols(wind_cols4) %>% bind_cols(wind_cols5) %>% bind_cols(wind_cols6) %>% bind_cols(wind_cols7) %>% bind_cols(wind_cols8) %>% bind_cols(college_train) %>%
+  rename(ADM_RATE_ALL = ADM_RATE_ALL...2) %>%
+  rename(SAT_AVG = SAT_AVG...70)
+```
+
+```{r, include = TRUE, echo = FALSE, warning = FALSE, figcap="Residuals for MLR, Lasso, and Ridge. The 3 models have similar results."}
+ splineplot %>%
+  ggplot(aes(x = SAT_AVG, y = ADM_RATE_ALL)) + 
+  geom_point() + 
+ geom_line(aes(y = .fitted1,color = "Fit 1")) + 
+  geom_line(aes(y = .fitted2, color = "Fit 2")) + 
+    geom_line(aes(y = .fitted3, color = "Fit 3")) + 
+   geom_line(aes(y = .fitted4, color = "Fit 4")) + 
+  geom_line(aes(y = .fitted5, color = "Fit 5")) + 
+  ggtitle(str_wrap("Regression Spline Fits. None seem to do that much better than the piecewise linear fit.",60))
+# Blue, red, purple, green, orange lines corresponds to fits 1 through 5 respectively.
+```
+We see that the purple curve (Fit 5), which has a knot of degree 5, has extra turning points that are not appropriate for the data. The extra knot at 1000 for the dark green curve (Fit 2) allows it to fit the data more closely. Overall, it is not clear that any of the splines do much better than the blue curve (Fit 4), though we haven't rigorously assessed this using DOF-adjusted metrics.
+
+
+Now, we run loess with the following spans:
+\begin{enumerate}
+\item 0.2
+\item 0.5
+\item 0.8
+\item 2
+\end{enumerate}
+
+
+```{r}
+loessplot <- wind_cols1 %>% bind_cols(wind_cols2) %>% bind_cols(wind_cols3) %>% bind_cols(wind_cols4) %>% bind_cols(wind_cols5) %>% bind_cols(wind_cols6) %>% bind_cols(wind_cols7) %>% bind_cols(wind_cols8) %>% bind_cols(wind_cols9) %>% bind_cols(college_train) %>%
+  rename(ADM_RATE_ALL = ADM_RATE_ALL...2) %>%
+  rename(SAT_AVG = SAT_AVG...76)
+```
+
+```{r, include = TRUE, echo = FALSE, warning = FALSE}
+loessplot %>%
+  ggplot(aes(x = SAT_AVG, y = ADM_RATE_ALL)) + 
+  geom_point() + 
+  geom_line(aes(y = .fitted6, color = "Fit 6")) + 
+  geom_line(aes(y = .fitted7, color = "Fit 7")) + 
+  geom_line(aes(y = .fitted8, color = "Fit 8")) + 
+  geom_line(aes(y = .fitted9, color = "Fit 9")) +  ggtitle(str_wrap("Loess Fits. These fits are quite beautiful, though a bit problematic when the span is small."))
+```
+
+The loess models all do a good job of capturing the changing slope in the data. Given how loess works, this makes sense. The span associated with the red curve is too small, leading to erratic behavior, but the erratic behavior isn't that dramatic
+
+Overall, I'd choose the blue spline model (Fit 4) to make future predictions. The blue spline model is very interpretable—we have a certain slope up to 1300 and a different slope after. It succinctly captures my intuition about what is happening with the slope of the points. We have a relatively flat slope up until about 1300, and then a greater slope later. However, this model is not differentiable, and so it is unable to capture how the slope might be changing continuously in a neighborhood around 1300.  The ideal model might be linear in the beginning, then become curved, and finally become linear again.
+
+<!-- another idea: Does the best spline correspond to best feature engineering of 1300...? maybe do $R^2_{\text{adj}}$ -->
+
+### Conclusion for Section 1
+Our findings here were more or less as expected. Adding degrees of freedom to the spline models (through more knots, higher degree) did not seem to dramatically help capture the relationships in the data. Although we chose the blue spline model for its simplicity, loess did a great job. Impressively, it automatically captures relevant features. For example, we did not need to specify the locations of knots to get it to work. How cool!  It would be great if we had ways of more easily interpreting loess models or performing ablation to remove unnecessary degrees of freedom from it.
+
+Trying many models here leaves us with the question of what's really going on with `SAT_AVG` and `ADM_RATE_ALL`'s relationship. It would be fascinating to try to use these data to find a model that both fits the data well and has some form of explanation. A piecewise linear relationship (as in the blue spline model) seems too simplistic. The real world tends to behave in a more differentiable way. Ideally, we want to see why some schools exhibit the linear relationship and others don't. We could take many random subsets of schools with SAT scores around 1300 (e.g. 1000 to 1500) and see which subsets exhibit the most linearity. Then, we could use a classifier to see what distinguishes those subsets from the others.
+
+## Section 2
+
+### Principal Components Analysis
+
+We apply Principal Components Analysis (PCA) to the explanatory variables and then perform a Principal Components Regression using the principal components. PCA compresses the features of all observation into $p$ features that capture the key (``principal'') axes of variation for the observations. We can visualize PCA as drawing a straight line in hyperspace such that when we project the positions of the observations to that line, the variance of the positions of the projections is maximized. We continue to draw such lines—with the additional requirement that each line is orthogonal to the lines that have already been drawn—until we have $p$ lines. The $p$ lines represent our $p$ principal components. After generating the principal components, we can use them as features in a linear model, giving us Principal Components Regression.
+
+PCA helps us get a more interpretable model for explaining the variance in admission rate. Multicollinearity in part III made it difficult to interpret coefficients because the predictors are correlated with one another (e.g. because `HIGHSAT` and `LOWSAT` have a Pearson correlation coefficient of -0.97, we cannot interpret each coefficient to mean "the change in response when other variables are held constant.") By understanding the key axes of variance for the predictors we are using, we can eliminate multicollinearity and understand which factors independently explain admission rate.
+
+<!-- **Because our principal components are uncorrelated, we can interpret the sizes and directions of the coefficients without fear of dependencies between variables.**  **Can figure out which variables are most important** -->
+
+<!-- do we choose number of components? -->
+
+<!-- Derivation? -->
+
+Principal Components Regression involves some assumptions. Since it is essentially an MLR model—it just involves variables that have been transformed into principal components—it assumes that our principal components satisfy the LINE conditions. However, provided that our original set of variables satisfy the LINE conditions, our principal components as well as the target variable will also satisfy the LINE conditions. Note that the previous statement only holds when we include all principal components in our regression. If we omit some, we can lose linearity.
+
+Although our original dataset does not satisfy equal and normal variance perfectly, for our purposes, we don't really need to worry about this—we are not trying to generate a predictive model, but rather to see which factors can explain the variance in admission rate.
+
+<!-- PCA involves linear combinations of columns and therefore holds the assumption that variables have a linear relationship with one another. Also, Principal Components Regression, like linear regression, assumes that the principal components satisfy the LINE conditions. Our dataset does not satisfy these assumptions perfectly. However, pairs plots have shown reasonably monotonic relationships between predictors as well as between predictors and the target, so we approximately have the linearity condition. For our purposes, we don't really need to worry about the conditions of equal and normal variance—we are not trying to generate a predictive model, but rather to see which factors can explain the variance in admission rate. Lastly, do satisfy independence. -->
+<!-- other technical conditions? -->
+<!-- scaling. sensitive to this. -->
+<!-- do you need to meet any other conditions? -->
+<!-- We satisfy requirements other than linearity for PCR if we satisfy them originally. -->
+<!-- only know we preserve linearity if we have all 30 principal components -->
+
+```{r}
+library(factoextra)
+bakedsubset.active <- bakedsubset[,2:30]
+res.pca <- prcomp(bakedsubset.active, scale = FALSE)
+```
+
+```{r, include = TRUE, echo = FALSE}
+#fviz_eig(res.pca)
+#fviz_eig(res.pca,choice = 'eigenvalue',
+#         ylim=c(0,40),bar_width=0.2) + geom_text(label = round(res.pca$sdev^2,1), vjust=-0.4, hjust = 0, size = 10)
+```
+
+We visualize our principal components as follows:
+
+```{r, include = TRUE, echo = FALSE}
+fviz_pca_var(res.pca,
+             col.var = "contrib", # Color by contributions to the PC
+             gradient.cols = c("#00AFBB", "#E7B800", "#FC4E07"),select.var = list(cos2 = 0.74),
+             repel = TRUE     # Avoid text overlapping
+             ) + ggtitle(str_wrap("Variables with cos2 >= 0.74. cos2 indicates the amount that each variable is represented in the principal components.",60))
+```
+We analyze the first principal component using the figure above. Variables involving SAT and `GT_THRESHOLD` (which indicates percentage of graduates earning above an average high school graduate) tend to live in the first principal component. Since earnings and SAT are generally related to intelligence, both of these variables are likely strongly related to intelligence. Therefore, the first principal component could relate largely to intelligence of students. Finally, note that the figure suggests that SAT has a large role in the variance of the explanatory variables. This is interesting given our hypothesis that SAT has a large role in explaining variance in admission rate.
+
+The second principal component is more closely connected to UGDS. It could reflect the name recognition of the institution, since larger institutions have greater name recognition.
+
+Lastly, we notice that interactions that involve similar variables are close together, which makes sense. For example, UGDS and an interaction term involving UGDS are close together.
+
+Below, we provide the results of our Principal Components Regression:
+```{r,include = TRUE,echo = FALSE}
+library(ISLR)
+library(dplyr)
+library(tidyr)
+library(pls)
+# Hitters = na.omit(Hitters) # Omit empty rows
+# set.seed(2)
+# pcr_fit = pcr(Salary~., data = Hitters, scale = TRUE, validation = "CV")
+# summary(pcr_fit)
+#library(analogue)
+pcr_model <- pcr(ADM_RATE_ALL~., data = bakedsubset, scale = FALSE)
+#coef(pcr_model)
+summary(pcr_model)
+```
+
+```{r}
+pcr_model$coefficients
+```
+We notice that the first 10 variables in the model take care of 41 percent of the variance. On the other hand, in our MLR model, the first 10 varaiables take care of 46% of the variance. This makes sense given how whereas our MLR model was created by forward selection, which chose variables according to what helped explain variance in Y, principal components were not chosen with Y in mind.
+
+In fact, we see that 39% of variance is explained by just the first 4 components, whereas having all 29 only explains 49% of the variance. The first component explains 16.94% of the variance—more than any other variable—revealing that the variables above that we considered to be intelligence-related are very powerful Although they are not associated with the variance in the explanatory variables as much as the first component, the third and fourth components explain over 10% of the variance in the target variable, making them more impressive than the first component as predictors. In contrast, the second component does virtually nothing to explain outcome variance. This is really cool—there could be a deep explanation for this.
+
+Like the first component, the third and fourth components seem to involve a lot of test-score related components. Interestingly, the fourth component has relatively large coefficients on interquartile ranges of test scores as well as endowment.  Since interquartile ranges reflect STEM focus, the fourth component could relate to the financial power of an institution.
+
+## Section 3
+
+### CollegeScoreCard Project Summary
+
+Our most interesting finding is the relationship between SAT scores and admission rates among undergraduate, 4-year schools receiving Title IV funding. Our MLR, ridge, and LASSO models did not yield clear insights about which variables are related to admission rates. At the same time, coefficients on SAT-related variables in these models as well as the principal components regression suggest that SAT score has the most powerful role in these models.  In addition, the prediction vs. outcome plot for our MLR model (as well as ridge and LASSO) resemble the plot of `SAT_AVG` vs. `ADM_RATE_ALL`, suggesting that SAT alone is responsible for much of the variance that our MLR model explains. Further supporting this, doing single variate regression with `SAT_AVG` and `ADM_RATE_ALL` yields an $R^2$ of $0.22$, compared to an $R^2$ of 0.4-0.5 in our more complex models.
+
+```{r}
+lm(data = college_train, ADM_RATE_ALL ~ SAT_AVG) %>% glance()
+```
+
+
+```{r, include = TRUE, echo = FALSE}
+college_train %>%
+  ggplot(aes(x=SAT_AVG, y=ADM_RATE_ALL)) +
+  geom_point() +
+  xlab("SAT Average") + 
+  ylab("Admission Rate") + 
+  ggtitle(str_wrap("Admission rate and SAT Average. There is a stark change in relationship when SAT is about 1300.", 60)) + 
+  #geom_smooth(method="lm", formula=y~x, se=FALSE, fullrange=TRUE) +
+  theme(legend.position="bottom") +
+  labs(color=str_wrap("SAT score"))
+
+```
+
+```{r, include = TRUE, echo = FALSE}
+ggplot() + geom_point(data = glmn_predrr, aes(y = .pred, x = ADM_RATE_ALL,color = "Ridge Regression")) +
+  geom_point(data = glmn_predls, aes(y = .pred, x = ADM_RATE_ALL,color = "LASSO")) +
+  geom_point(data = dfforward, aes(y = .fitted, x =ADM_RATE_ALL,color = "MLR")) +
+  geom_point(alpha = .3) + 
+  coord_equal() + ggtitle( str_wrap("Observed vs. Predicted for MLR, Lasso, and Ridge Regression. The three models have similar results.", 60)) +  geom_abline(col = "brown") 
+```
+
+The relationship between `SAT_AVG` and `ADM_RATE_ALL` is fascinating because the relationship changes in such an obvious way and so rapidly. Above an SAT score of 1300, the relationship immediately changes from a nearly uncorrelated one to a strongly correlated one. So, one of the most appropriate avenues forward for shedding light on admission rate would be to see why some schools exhibit the linear relationship and others don't. We could take many random subsets of schools with SAT scores around 1300 (e.g. 1000 to 1500) and see which subsets exhibit the most linearity. Then, we could use a classifier to see what distinguishes those subsets from the others. It could be that some variables in the dataset that we haven't considered will help with the classifier, such as the geographic locations of schools. It could be that the socioeconomic status of students is the main distinction between the two categories, so we could seek more data on that, such as attendance of private schools.
+
+On the other hand, having SAT in the model could have prevented us from getting insights into the relationships between other variables and admission rate. It is natural that scores on the SAT, an admissions test, should be related to admission rate. To see whether we might have some surprising variables related to admission rate, it is also important to generate a model that omits SAT.
+
+In future data analysis, it could be useful to focus more on single-variate regression than multivariate regression. Since our goal is not to generate a predictive model but rather to understand the relationships between different variables and admission rate, using single variate regression will help avoid the ambiguity that MLR produces in how each variable is individually related to the target. 
+
+Future analysis would also benefit from a more clear delineation of what our population is. Although we have clearly defined our population as four-year undergraduate institutions receiving Title IV funding, it is not clear what the significance of Title IV funding is. Judging by the non-constant relationship between SAT scores and admission rate within our population, it seems that some of the schools do not match our Pomona student intuition of what a college is—we would expect SAT scores to always have a negative relationship with admission rate. We could think of this situation as involving perhaps two populations—the schools whose admission rate is relatively unrelated to SAT score and the schools whose admission rate is related. The classifier mentioned above could help us more clearly define what these two populations are.
+
+To conclude, we found some unexpected insights from our college data. We very well might be better off conceiving of our dataset as containing two populations rather than just one. Our project serves as a reminder of the importrance of specifying a population according to which research questions we want to bring to data. In our case, we were initially interested in what explained the admission rates of prestigious colleges we were interested in, but then found that the dataset consisted of many colleges that were much different. In response, we could have formed a rigorous computational definition of top colleges to more precisely specify our population, or we could have changed our research question to classifying the colleges in the dataset into meaningful sub-populations.
+
+
+<!-- NUMBER FIGURES? -->
+
+<!-- FORMATTING (see Hardin notes) -->
+
+<!-- • use captions for every plot; e.g., in the chunk command give the caption: ‘‘‘{r fig.cap = "here is the caption"} -->
+<!-- • use complete sentences. -->
+<!-- • annotate everything that the reader sees. -->
+<!-- • remember things we’ve learned: e.g., provide the reader with residual plots which are most informative. -->
+<!-- • be very careful with the difference between individual prediction intervals and mean (average) intervals. -->
+<!-- • use appropriate wording. E.g., a p-value is a probability of the data... the relationships you are testing are linear... -->
+<!-- • push both the .Rmd and .pdf file to Git. Your .Rmd file must compile to .pdf. In order for the file to compile, the data must live in the GitHub repository! -->
+
+<!-- send -->
+
+<!-- quick proofread -->
+
+<!-- add figure no.'s and refer to them? -->
+
+<!-- Vast possibilities for data analysis are beautiful. So much possibility for discovery. Would love to capture the essence and automate it while also involving human insight. Back and forth between human and AI data analysis. How do you quantify the impact of data? -->
+
+<!-- try doing LASSO with all variables! -->
+<!-- create feature indicating number of null entries. -->
+
+
+
+<!-- PCR shows SAT has big role -->
+<!-- SAT is obvious—meaningful to explore this for our purposes? SAT is an admissions test! *That's why it worked well.* We have to think about what we want. It's mostly helpful for classifying institutions.  -->
+<!-- Also SAT doesn't help with most institutions! -->
+<!-- Reflect further on directions for SAT analysis above. Do you think maybe the results are fascinating, but the sampling was poorly done and so the analysis should be re-done on a better sample? -->
+<!-- Be sure to communicate about the inference part: to who/what can you infer your result. this isn't really clear. we want to answer this question! figure out how we should break up institutions, why some institutions have a relationship with SAT and some don't. -->
